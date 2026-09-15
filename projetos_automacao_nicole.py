@@ -71,7 +71,7 @@ msg_box = encontrar_elemento(driver, [
 ], "caixa de mensagem")
 
 msg_box.click()
-msg_box.send_keys("@thiagoaraujo")
+msg_box.send_keys("@nicolemendes")
 msg_box.send_keys(Keys.ENTER)
 
 print("Mensagem enviada com sucesso!")

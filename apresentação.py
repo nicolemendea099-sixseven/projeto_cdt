@@ -63,6 +63,18 @@ STATE_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "tamagotchi_state.json"
 )
 
+# ---------- Configurações de janela flutuante ----------
+CORNER_MARGIN = 16
+FULL_SIZE = (380, 780)
+MINI_SIZE = (170, 230)
+
+CORNER_OPTIONS = [
+    ("Sup. esquerdo", "top-left"),
+    ("Sup. direito", "top-right"),
+    ("Inf. esquerdo", "bottom-left"),
+    ("Inf. direito", "bottom-right"),
+]
+
 
 # ---------- Detecção de janela ativa (multiplataforma) ----------
 def get_active_window_title():
@@ -206,6 +218,8 @@ def load_state():
         "happiness": 70, "xp": 0, "level": 1,
         "name": "", "appearance": "tradicional",
         "owner_name": "", "owner_nickname": "", "owner_age": "",
+        "pinned": True, "mini_mode": False, "corner": "bottom-right",
+        "target_minutes": 60, "seconds_focused": 0,
     }
     if os.path.exists(STATE_FILE):
         try:
@@ -219,12 +233,19 @@ def load_state():
                 default["owner_name"] = data.get("owner_name", "")
                 default["owner_nickname"] = data.get("owner_nickname", "")
                 default["owner_age"] = data.get("owner_age", "")
+                default["pinned"] = data.get("pinned", True)
+                default["mini_mode"] = data.get("mini_mode", False)
+                default["corner"] = data.get("corner", "bottom-right")
+                default["target_minutes"] = data.get("target_minutes", 60)
+                default["seconds_focused"] = data.get("seconds_focused", 0)
         except Exception:
             pass
     return default
 
 
-def save_state(happiness, xp, level, name, appearance, owner_name="", owner_nickname="", owner_age=""):
+def save_state(happiness, xp, level, name, appearance, owner_name="", owner_nickname="",
+               owner_age="", pinned=True, mini_mode=False, corner="bottom-right",
+               target_minutes=60, seconds_focused=0):
     try:
         with open(STATE_FILE, "w") as f:
             json.dump(
@@ -237,6 +258,11 @@ def save_state(happiness, xp, level, name, appearance, owner_name="", owner_nick
                     "owner_name": owner_name,
                     "owner_nickname": owner_nickname,
                     "owner_age": owner_age,
+                    "pinned": pinned,
+                    "mini_mode": mini_mode,
+                    "corner": corner,
+                    "target_minutes": target_minutes,
+                    "seconds_focused": seconds_focused,
                     "updated": datetime.now().isoformat(),
                 },
                 f,
@@ -370,7 +396,6 @@ class RoundedBar(tk.Canvas):
 class Tamagotchi(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.geometry("380x720")
         self.resizable(False, False)
         self.configure(bg=COLORS["bg"])
 
@@ -387,9 +412,17 @@ class Tamagotchi(tk.Tk):
         self.owner_nickname = state["owner_nickname"]
         self.owner_age = state["owner_age"]
 
+        self.pinned = state["pinned"]
+        self.mini_mode = state["mini_mode"]
+        self.corner = state["corner"]
+
+        self.target_minutes = state.get("target_minutes", 60)
+        self.seconds_focused = state.get("seconds_focused", 0)
+
         is_first_time = not bool(self.owner_name)
 
         if is_first_time:
+            self.geometry(f"{FULL_SIZE[0]}x{FULL_SIZE[1]}")
             self.update_idletasks()
             (
                 name,
@@ -397,12 +430,14 @@ class Tamagotchi(tk.Tk):
                 owner_name,
                 owner_nickname,
                 owner_age,
+                target_minutes,
             ) = self.ask_profile_setup(
                 initial_name="",
                 initial_appearance="tradicional",
                 initial_owner_name="",
                 initial_owner_nickname="",
                 initial_owner_age="",
+                initial_target_minutes=60,
                 first_time=True,
             )
             self.pet_name = name
@@ -410,16 +445,8 @@ class Tamagotchi(tk.Tk):
             self.owner_name = owner_name
             self.owner_nickname = owner_nickname
             self.owner_age = owner_age
-            save_state(
-                self.happiness,
-                self.xp,
-                self.level,
-                self.pet_name,
-                self.appearance,
-                self.owner_name,
-                self.owner_nickname,
-                self.owner_age,
-            )
+            self.target_minutes = target_minutes
+            self.persist_state()
             self.speech_text = f"Bem vindo a seu Tamagotchi {self.owner_name}!"
         else:
             self.speech_text = f"Bem vindo novamente {self.owner_name}!"
@@ -451,16 +478,24 @@ class Tamagotchi(tk.Tk):
 
         # ----- Bichinho -----
         self.canvas = tk.Canvas(
-            self.card, width=320, height=280, bg=COLORS["card"],
+            self.card, width=320, height=220, bg=COLORS["card"],
             highlightthickness=0
         )
         self.canvas.pack(pady=(6, 2))
+        self.canvas.bind("<Button-1>", self.on_canvas_click)
 
         self.label_status = tk.Label(
             self.card, text="Iniciando...", font=FONT_STATUS,
             fg=COLORS["text"], bg=COLORS["card"]
         )
         self.label_status.pack(pady=(0, 2))
+
+        # Botão para expandir quando estiver no modo mini
+        self.btn_expand = RoundedButton(
+            self.card, text="🔍 Expandir", command=self.toggle_mini,
+            bg=COLORS["primary"], fg="#ffffff", hover_bg=COLORS["primary_dark"],
+            width=120, height=28, parent_bg=COLORS["card"]
+        )
 
         self.label_app = tk.Label(
             self.card, text="", font=FONT_SUB, fg=COLORS["text_muted"],
@@ -476,63 +511,214 @@ class Tamagotchi(tk.Tk):
         self.label_warning.pack(pady=(0, 6), fill="x", padx=16)
 
         # ----- Botões -----
-        buttons_row1 = tk.Frame(self.card, bg=COLORS["card"])
-        buttons_row1.pack(pady=(0, 6))
+        self.buttons_row1 = tk.Frame(self.card, bg=COLORS["card"])
+        self.buttons_row1.pack(pady=(0, 6))
 
         self.btn_diagnose = RoundedButton(
-            buttons_row1, text="🔍 Diagnosticar", command=self.show_diagnostics,
+            self.buttons_row1, text="🔍 Diagnosticar", command=self.show_diagnostics,
             bg=COLORS["track"], fg=COLORS["text"], hover_bg="#e2e5f0",
             width=150, height=32, parent_bg=COLORS["card"]
         )
         self.btn_diagnose.pack(side="left", padx=5)
 
         self.btn_test_notification = RoundedButton(
-            buttons_row1, text="🔔 Testar notificação", command=self.test_notification,
+            self.buttons_row1, text="🔔 Testar notificação", command=self.test_notification,
             bg=COLORS["track"], fg=COLORS["text"], hover_bg="#e2e5f0",
             width=150, height=32, parent_bg=COLORS["card"]
         )
         self.btn_test_notification.pack(side="left", padx=5)
 
-        buttons_row2 = tk.Frame(self.card, bg=COLORS["card"])
-        buttons_row2.pack(pady=(0, 10))
+        self.buttons_row2 = tk.Frame(self.card, bg=COLORS["card"])
+        self.buttons_row2.pack(pady=(0, 10))
 
         self.btn_edit_profile = RoundedButton(
-            buttons_row2, text="✏️ Editar perfil", command=self.edit_profile,
+            self.buttons_row2, text="✏️ Editar perfil", command=self.edit_profile,
             bg=COLORS["primary"], fg="#ffffff", hover_bg=COLORS["primary_dark"],
             width=150, height=32, parent_bg=COLORS["card"]
         )
         self.btn_edit_profile.pack()
 
+        # ----- Linha: fixar no canto + modo mini -----
+        self.buttons_row3 = tk.Frame(self.card, bg=COLORS["card"])
+        self.buttons_row3.pack(pady=(0, 10))
+
+        self.btn_pin = RoundedButton(
+            self.buttons_row3, text="", command=self.toggle_pin,
+            bg=COLORS["track"], fg=COLORS["text"], hover_bg="#e2e5f0",
+            width=150, height=32, parent_bg=COLORS["card"]
+        )
+        self.btn_pin.pack(side="left", padx=5)
+
+        self.btn_mini = RoundedButton(
+            self.buttons_row3, text="🔻 Modo mini (canto)", command=self.toggle_mini,
+            bg=COLORS["track"], fg=COLORS["text"], hover_bg="#e2e5f0",
+            width=150, height=32, parent_bg=COLORS["card"]
+        )
+        self.btn_mini.pack(side="left", padx=5)
+
+        # ----- Tempo de Trabalho / Meta -----
+        self.label_target_title = tk.Label(
+            self.card, text="TEMPO DE TRABALHO / META", font=("Segoe UI", 8, "bold"),
+            fg=COLORS["text_muted"], bg=COLORS["card"]
+        )
+        self.label_target_title.pack(pady=(4, 2))
+
+        self.bar_target = RoundedBar(
+            self.card, width=300, height=20, track_color=COLORS["track"],
+            fill_color=COLORS["primary"], bg=COLORS["card"], text_fg="#ffffff"
+        )
+        self.bar_target.pack(pady=(0, 2))
+
+        self.label_time_details = tk.Label(
+            self.card, text="", font=FONT_SMALL,
+            fg=COLORS["text_muted"], bg=COLORS["card"]
+        )
+        self.label_time_details.pack(pady=(0, 8))
+
         # ----- Barra de felicidade -----
-        tk.Label(self.card, text="FELICIDADE", font=("Segoe UI", 8, "bold"),
-                 fg=COLORS["text_muted"], bg=COLORS["card"]).pack(pady=(6, 2))
+        self.label_happiness_title = tk.Label(
+            self.card, text="FELICIDADE", font=("Segoe UI", 8, "bold"),
+            fg=COLORS["text_muted"], bg=COLORS["card"])
+        self.label_happiness_title.pack(pady=(2, 2))
+
         self.bar_happiness = RoundedBar(
-            self.card, width=300, height=24, track_color=COLORS["track"],
+            self.card, width=300, height=20, track_color=COLORS["track"],
             fill_color=COLORS["success"], bg=COLORS["card"], text_fg="#ffffff"
         )
-        self.bar_happiness.pack(pady=(0, 10))
+        self.bar_happiness.pack(pady=(0, 8))
 
         # ----- Barra de XP -----
-        tk.Label(self.card, text="EXPERIÊNCIA", font=("Segoe UI", 8, "bold"),
-                 fg=COLORS["text_muted"], bg=COLORS["card"]).pack(pady=(0, 2))
+        self.label_xp_title = tk.Label(
+            self.card, text="EXPERIÊNCIA", font=("Segoe UI", 8, "bold"),
+            fg=COLORS["text_muted"], bg=COLORS["card"])
+        self.label_xp_title.pack(pady=(0, 2))
+
         self.bar_xp = RoundedBar(
             self.card, width=300, height=14, track_color=COLORS["primary_light"],
             fill_color=COLORS["primary"], bg=COLORS["card"], text_fg=COLORS["text"]
         )
-        self.bar_xp.pack(pady=(0, 4))
+        self.bar_xp.pack(pady=(0, 2))
+
         self.label_xp = tk.Label(
             self.card, text="", font=FONT_SMALL,
             fg=COLORS["text_muted"], bg=COLORS["card"]
         )
-        self.label_xp.pack(pady=(0, 10))
+        self.label_xp.pack(pady=(0, 8))
 
+        # Widgets que somem no modo mini
+        self.full_only_widgets = [
+            self.badge_level, self.label_name, self.label_app, self.label_warning,
+            self.buttons_row1, self.buttons_row2, self.buttons_row3,
+            self.label_target_title, self.bar_target, self.label_time_details,
+            self.label_happiness_title, self.bar_happiness,
+            self.label_xp_title, self.bar_xp, self.label_xp,
+        ]
+
+        self.update_pin_button_text()
+        self.apply_layout_mode()
         self.refresh_stats()
         self.after(200, self.start_polling)
 
+    def on_canvas_click(self, event):
+        if self.mini_mode:
+            self.toggle_mini()
+
+    def persist_state(self):
+        save_state(
+            self.happiness,
+            self.xp,
+            self.level,
+            self.pet_name,
+            self.appearance,
+            self.owner_name,
+            self.owner_nickname,
+            self.owner_age,
+            self.pinned,
+            self.mini_mode,
+            self.corner,
+            self.target_minutes,
+            self.seconds_focused,
+        )
+
+    def toggle_pin(self):
+        self.pinned = not self.pinned
+        self.update_pin_button_text()
+        self.wm_attributes("-topmost", self.pinned)
+        self.persist_state()
+
+    def update_pin_button_text(self):
+        txt = "📌 Fixado" if self.pinned else "📌 Desfixado"
+        self.btn_pin.set_text(txt)
+
+    def toggle_mini(self):
+        self.mini_mode = not self.mini_mode
+        self.apply_layout_mode()
+        self.persist_state()
+
+    def apply_layout_mode(self):
+        self.wm_attributes("-topmost", self.pinned)
+
+        if self.mini_mode:
+            self.btn_mini.set_text("🔺 Modo expandido")
+            for w in self.full_only_widgets:
+                w.pack_forget()
+
+            self.btn_expand.pack(pady=(4, 0))
+            self.canvas.config(cursor="hand2")
+
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+            w, h = MINI_SIZE
+            m = CORNER_MARGIN
+
+            if self.corner == "top-left":
+                x, y = m, m
+            elif self.corner == "top-right":
+                x, y = sw - w - m, m
+            elif self.corner == "bottom-left":
+                x, y = m, sh - h - m - 40
+            else:
+                x, y = sw - w - m, sh - h - m - 40
+
+            self.geometry(f"{w}x{h}+{x}+{y}")
+            self.canvas.config(width=140, height=130)
+        else:
+            self.btn_expand.pack_forget()
+            self.canvas.config(cursor="")
+
+            self.btn_mini.set_text("🔻 Modo mini")
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+            w, h = FULL_SIZE
+            x = (sw - w) // 2
+            y = (sh - h) // 2
+            self.geometry(f"{w}x{h}+{x}+{y}")
+
+            self.badge_level.pack()
+            self.label_name.pack(pady=(6, 0))
+            self.label_app.pack(pady=(0, 4))
+            self.label_warning.pack(pady=(0, 6), fill="x", padx=16)
+            self.buttons_row1.pack(pady=(0, 6))
+            self.buttons_row2.pack(pady=(0, 10))
+            self.buttons_row3.pack(pady=(0, 10))
+
+            self.label_target_title.pack(pady=(4, 2))
+            self.bar_target.pack(pady=(0, 2))
+            self.label_time_details.pack(pady=(0, 8))
+
+            self.label_happiness_title.pack(pady=(2, 2))
+            self.bar_happiness.pack(pady=(0, 8))
+
+            self.label_xp_title.pack(pady=(0, 2))
+            self.bar_xp.pack(pady=(0, 2))
+            self.label_xp.pack(pady=(0, 8))
+
+            self.canvas.config(width=320, height=220)
+
+        self.draw_pet()
+
     def draw_pet(self):
-        """Desenha o pet no Canvas dinamicamente com base na felicidade e aparência."""
         self.canvas.delete("all")
-        cx, cy = 160, 160
 
         if self.happiness >= 85:
             mood = "eufórico"
@@ -549,61 +735,71 @@ class Tamagotchi(tk.Tk):
 
         colors = MOOD_COLORS.get(mood, MOOD_COLORS["neutro"])
 
+        if self.mini_mode:
+            cx, cy = 70, 65
+            scale = 0.50
+        else:
+            cx, cy = 160, 120
+            scale = 1.0
+
+        def s(val):
+            return val * scale
+
         # Sombra e Aura
-        self.canvas.create_oval(cx - 75, cy + 65, cx + 75, cy + 85, fill="#e5e7eb", outline="")
-        self.canvas.create_oval(cx - 95, cy - 95, cx + 95, cy + 95, fill=colors["aura"], outline="")
-        self.canvas.create_oval(cx - 80, cy - 80, cx + 80, cy + 80, fill=colors["light"], outline="")
+        self.canvas.create_oval(cx - s(75), cy + s(65), cx + s(75), cy + s(85), fill="#e5e7eb", outline="")
+        self.canvas.create_oval(cx - s(95), cy - s(95), cx + s(95), cy + s(95), fill=colors["aura"], outline="")
+        self.canvas.create_oval(cx - s(80), cy - s(80), cx + s(80), cy + s(80), fill=colors["light"], outline="")
 
-        # Orelhas conforme aparência
+        # Orelhas
         if self.appearance == "gato":
-            self.canvas.create_polygon(cx - 65, cy - 40, cx - 35, cy - 90, cx - 15, cy - 60, fill=colors["body"], outline="")
-            self.canvas.create_polygon(cx + 15, cy - 60, cx + 35, cy - 90, cx + 65, cy - 40, fill=colors["body"], outline="")
+            self.canvas.create_polygon(cx - s(65), cy - s(40), cx - s(35), cy - s(90), cx - s(15), cy - s(60), fill=colors["body"], outline="")
+            self.canvas.create_polygon(cx + s(15), cy - s(60), cx + s(35), cy - s(90), cx + s(65), cy - s(40), fill=colors["body"], outline="")
         elif self.appearance == "coelho":
-            self.canvas.create_oval(cx - 45, cy - 130, cx - 15, cy - 40, fill=colors["body"], outline="")
-            self.canvas.create_oval(cx + 15, cy - 130, cx + 45, cy - 40, fill=colors["body"], outline="")
-            self.canvas.create_oval(cx - 38, cy - 120, cx - 22, cy - 50, fill=colors["light"], outline="")
-            self.canvas.create_oval(cx + 22, cy - 120, cx + 38, cy - 50, fill=colors["light"], outline="")
+            self.canvas.create_oval(cx - s(45), cy - s(130), cx - s(15), cy - s(40), fill=colors["body"], outline="")
+            self.canvas.create_oval(cx + s(15), cy - s(130), cx + s(45), cy - s(40), fill=colors["body"], outline="")
+            self.canvas.create_oval(cx - s(38), cy - s(120), cx - s(22), cy - s(50), fill=colors["light"], outline="")
+            self.canvas.create_oval(cx + s(22), cy - s(120), cx + s(38), cy - s(50), fill=colors["light"], outline="")
         elif self.appearance == "cachorro":
-            self.canvas.create_oval(cx - 85, cy - 40, cx - 45, cy + 30, fill=colors["body"], outline="")
-            self.canvas.create_oval(cx + 45, cy - 40, cx + 85, cy + 30, fill=colors["body"], outline="")
+            self.canvas.create_oval(cx - s(85), cy - s(40), cx - s(45), cy + s(30), fill=colors["body"], outline="")
+            self.canvas.create_oval(cx + s(45), cy - s(40), cx + s(85), cy + s(30), fill=colors["body"], outline="")
 
-        # Corpo principal
-        self.canvas.create_oval(cx - 65, cy - 65, cx + 65, cy + 65, fill=colors["body"], outline="")
+        # Corpo
+        self.canvas.create_oval(cx - s(65), cy - s(65), cx + s(65), cy + s(65), fill=colors["body"], outline="")
 
         # Olhos
         if mood == "doente":
-            self.canvas.create_text(cx - 25, cy - 10, text="x", font=("Segoe UI", 20, "bold"), fill="#4b5563")
-            self.canvas.create_text(cx + 25, cy - 10, text="x", font=("Segoe UI", 20, "bold"), fill="#4b5563")
+            font_sz = int(20 * scale)
+            self.canvas.create_text(cx - s(25), cy - s(10), text="x", font=("Segoe UI", font_sz, "bold"), fill="#4b5563")
+            self.canvas.create_text(cx + s(25), cy - s(10), text="x", font=("Segoe UI", font_sz, "bold"), fill="#4b5563")
         elif mood == "eufórico":
-            self.canvas.create_arc(cx - 35, cy - 20, cx - 15, cy, start=0, extent=180, style="arc", width=3, outline="#1f2937")
-            self.canvas.create_arc(cx + 15, cy - 20, cx + 35, cy, start=0, extent=180, style="arc", width=3, outline="#1f2937")
+            self.canvas.create_arc(cx - s(35), cy - s(20), cx - s(15), cy, start=0, extent=180, style="arc", width=int(3 * scale), outline="#1f2937")
+            self.canvas.create_arc(cx + s(15), cy - s(20), cx + s(35), cy, start=0, extent=180, style="arc", width=int(3 * scale), outline="#1f2937")
         else:
-            self.canvas.create_oval(cx - 32, cy - 18, cx - 18, cy - 4, fill="#1f2937", outline="")
-            self.canvas.create_oval(cx + 18, cy - 18, cx + 32, cy - 4, fill="#1f2937", outline="")
+            self.canvas.create_oval(cx - s(32), cy - s(18), cx - s(18), cy - s(4), fill="#1f2937", outline="")
+            self.canvas.create_oval(cx + s(18), cy - s(18), cx + s(32), cy - s(4), fill="#1f2937", outline="")
 
         # Boca
         if mood in ["feliz", "eufórico"]:
-            self.canvas.create_arc(cx - 20, cy - 5, cx + 20, cy + 25, start=180, extent=180, fill="#ef4444", outline="")
+            self.canvas.create_arc(cx - s(20), cy - s(5), cx + s(20), cy + s(25), start=180, extent=180, fill="#ef4444", outline="")
         elif mood in ["triste", "irritado", "doente"]:
-            self.canvas.create_arc(cx - 20, cy + 10, cx + 20, cy + 35, start=0, extent=180, style="arc", width=3, outline="#1f2937")
+            self.canvas.create_arc(cx - s(20), cy + s(10), cx + s(20), cy + s(35), start=0, extent=180, style="arc", width=int(3 * scale), outline="#1f2937")
         else:
-            self.canvas.create_line(cx - 15, cy + 15, cx + 15, cy + 15, width=3, fill="#1f2937")
+            self.canvas.create_line(cx - s(15), cy + s(15), cx + s(15), cy + s(15), width=int(3 * scale), fill="#1f2937")
 
-        # Focinho (se for pet animal)
         if self.appearance in ["gato", "cachorro", "coelho"]:
-            self.canvas.create_polygon(cx - 6, cy + 2, cx + 6, cy + 2, cx, cy + 8, fill="#374151", outline="")
+            self.canvas.create_polygon(cx - s(6), cy + s(2), cx + s(6), cy + s(2), cx, cy + s(8), fill="#374151", outline="")
 
-        # Balão de Fala (Speech Bubble)
-        if self.speech_text:
-            bx, by = 160, 45
+        # Balão de fala (Apenas modo expandido)
+        if self.speech_text and not self.mini_mode:
+            bx, by = 160, 25
             self.canvas.create_polygon(
-                bx - 120, by - 25, bx + 120, by - 25, bx + 120, by + 15,
+                bx - 120, by - 20, bx + 120, by - 20, bx + 120, by + 15,
                 bx + 15, by + 15, bx, by + 28, bx - 5, by + 15,
                 bx - 120, by + 15,
                 fill="#ffffff", outline=COLORS["primary"], width=2
             )
             self.canvas.create_text(
-                bx, by - 5, text=self.speech_text,
+                bx, by - 3, text=self.speech_text,
                 font=("Segoe UI", 8, "bold"), fill=COLORS["text"], width=230, justify="center"
             )
 
@@ -616,6 +812,18 @@ class Tamagotchi(tk.Tk):
         self.label_xp.config(text=f"Nível {self.level} • {self.xp} XP")
         self.badge_level.set_text(f"⭐ Nível {self.level}")
 
+        target_seconds = max(1, self.target_minutes * 60)
+        target_pct = max(0.0, min(1.0, self.seconds_focused / target_seconds))
+        
+        mins = self.seconds_focused // 60
+        secs = self.seconds_focused % 60
+        time_formatted = f"{mins}m {secs:02d}s"
+        
+        self.bar_target.set(target_pct, text=f"{int(target_pct * 100)}% da Meta")
+        self.label_time_details.config(
+            text=f"Focado: {time_formatted} / Meta: {self.target_minutes} min"
+        )
+
         if self.happiness <= CRITICAL_HAPPINESS:
             self.label_status.config(text="Preciso de atenção!")
         elif self.happiness >= 70:
@@ -625,10 +833,54 @@ class Tamagotchi(tk.Tk):
 
         self.draw_pet()
 
+    def start_polling(self):
+        self.poll_activity()
+
+    def poll_activity(self):
+        title = get_active_window_title()
+        process_name = get_active_process_name()
+        category, label = classify_activity(title, process_name)
+
+        self.label_app.config(text=f"Ativo: {label[:35]}")
+
+        if category == "produtivo":
+            self.happiness = min(100, self.happiness + BOOST_PRODUCTIVE)
+            self.xp += XP_PER_PRODUCTIVE_TICK
+            
+            seconds_added = POLL_INTERVAL_MS // 1000
+            self.seconds_focused += seconds_added
+
+            self.speech_text = "Muito bem! Continue focado!"
+            if self.xp >= XP_PER_LEVEL:
+                self.level += 1
+                self.xp = 0
+                self.speech_text = f"Subiu para o Nível {self.level}! 🎉"
+
+        elif category == "distracao":
+            self.happiness = max(0, self.happiness - PENALTY_DISTRACTION)
+            self.speech_text = "Ei! Volte ao trabalho!"
+
+        else:
+            self.happiness = max(0, self.happiness - DECAY_PER_TICK)
+
+        if self.happiness <= CRITICAL_HAPPINESS and not self.notified_critical:
+            send_critical_notification(self.happiness)
+            self.notified_critical = True
+        elif self.happiness > CRITICAL_HAPPINESS:
+            self.notified_critical = False
+
+        self.refresh_stats()
+        self.persist_state()
+
+        self.after(POLL_INTERVAL_MS, self.poll_activity)
+
     def show_diagnostics(self):
         title = get_active_window_title()
         process_name = get_active_process_name()
         category, label = classify_activity(title, process_name)
+
+        mins = self.seconds_focused // 60
+        secs = self.seconds_focused % 60
 
         details = [
             f"Janela ativa: {title or 'não detectada'}",
@@ -636,6 +888,7 @@ class Tamagotchi(tk.Tk):
             f"Classificação: {category}",
             f"Rótulo: {label}",
             f"Usuário: {self.owner_name} ({self.owner_nickname}), {self.owner_age} anos",
+            f"Tempo Focado: {mins}m {secs}s / Meta: {self.target_minutes} min",
         ]
         messagebox.showinfo("Diagnóstico", "\n".join(details))
 
@@ -659,6 +912,7 @@ class Tamagotchi(tk.Tk):
         initial_owner_name="",
         initial_owner_nickname="",
         initial_owner_age="",
+        initial_target_minutes=60,
         first_time=False,
     ):
         dialog = tk.Toplevel(self)
@@ -668,17 +922,14 @@ class Tamagotchi(tk.Tk):
         dialog.resizable(False, False)
         dialog.configure(bg=COLORS["bg"])
 
-        # Centraliza a janela
-        window_w, window_h = 340, 520
+        window_w, window_h = 340, 580
         pos_x = self.winfo_x() + (self.winfo_width() // 2) - (window_w // 2)
         pos_y = self.winfo_y() + (self.winfo_height() // 2) - (window_h // 2)
         dialog.geometry(f"{window_w}x{window_h}+{pos_x}+{pos_y}")
 
-        # Card Principal
         card = tk.Frame(dialog, bg=COLORS["card"], highlightbackground=COLORS["card_border"], highlightthickness=1)
         card.pack(fill="both", expand=True, padx=16, pady=16)
 
-        # Cabeçalho
         title_text = "✨ Novo Perfil" if first_time else "✏️ Editar Perfil"
         tk.Label(
             card, text=title_text, font=("Segoe UI", 12, "bold"),
@@ -699,7 +950,7 @@ class Tamagotchi(tk.Tk):
         entry_owner_name.pack(padx=8, pady=5, fill="x")
         entry_owner_name.insert(0, initial_owner_name)
 
-        # Campo: Seu Apelido e Idade em linha única
+        # Campo: Seu Apelido e Idade
         row_user_info = tk.Frame(card, bg=COLORS["card"])
         row_user_info.pack(padx=20, pady=(0, 8), fill="x")
 
@@ -733,15 +984,27 @@ class Tamagotchi(tk.Tk):
         entry_owner_age.pack(padx=8, pady=5, fill="x")
         entry_owner_age.insert(0, initial_owner_age)
 
+        # Campo: Meta de Trabalho (Minutos)
+        tk.Label(
+            card, text="META DE TRABALHO (MINUTOS)", font=("Segoe UI", 8, "bold"),
+            fg=COLORS["text_muted"], bg=COLORS["card"]
+        ).pack(anchor="w", padx=20, pady=(0, 2))
+        f_target = tk.Frame(card, bg=COLORS["track"], bd=0)
+        f_target.pack(padx=20, pady=(0, 8), fill="x")
+        entry_target_minutes = tk.Entry(
+            f_target, font=("Segoe UI", 9), bg=COLORS["track"],
+            fg=COLORS["text"], bd=0, relief="flat"
+        )
+        entry_target_minutes.pack(padx=8, pady=5, fill="x")
+        entry_target_minutes.insert(0, str(initial_target_minutes))
+
         # Campo: Nome do Pet
         tk.Label(
             card, text="NOME DO PET", font=("Segoe UI", 8, "bold"),
             fg=COLORS["text_muted"], bg=COLORS["card"]
         ).pack(anchor="w", padx=20, pady=(0, 2))
-
         entry_frame = tk.Frame(card, bg=COLORS["track"], bd=0)
         entry_frame.pack(padx=20, pady=(0, 8), fill="x")
-
         entry_name = tk.Entry(
             entry_frame, font=("Segoe UI", 9), bg=COLORS["track"],
             fg=COLORS["text"], bd=0, relief="flat"
@@ -749,7 +1012,7 @@ class Tamagotchi(tk.Tk):
         entry_name.pack(padx=8, pady=5, fill="x")
         entry_name.insert(0, initial_name)
 
-        # Campo: Aparência (Seleção Interativa)
+        # Campo: Aparência
         tk.Label(
             card, text="APARÊNCIA DO PET", font=("Segoe UI", 8, "bold"),
             fg=COLORS["text_muted"], bg=COLORS["card"]
@@ -773,7 +1036,6 @@ class Tamagotchi(tk.Tk):
         grid_frame = tk.Frame(card, bg=COLORS["card"])
         grid_frame.pack(padx=20, pady=(0, 12), fill="x")
 
-        # Grade 2x2 para seleção visual dos tipos de pet
         for idx, (label_text, value) in enumerate(APPEARANCE_OPTIONS):
             r, c = divmod(idx, 2)
             is_selected = (value == initial_appearance)
@@ -796,23 +1058,19 @@ class Tamagotchi(tk.Tk):
             owner_name = entry_owner_name.get().strip() or "Amigo"
             owner_nickname = entry_owner_nickname.get().strip() or owner_name
             owner_age = entry_owner_age.get().strip() or ""
+            try:
+                target_minutes = int(entry_target_minutes.get().strip())
+            except ValueError:
+                target_minutes = 60
 
             self.pet_name = name
             self.appearance = appearance
             self.owner_name = owner_name
             self.owner_nickname = owner_nickname
             self.owner_age = owner_age
+            self.target_minutes = target_minutes
 
-            save_state(
-                self.happiness,
-                self.xp,
-                self.level,
-                self.pet_name,
-                self.appearance,
-                self.owner_name,
-                self.owner_nickname,
-                self.owner_age,
-            )
+            self.persist_state()
             self.title(f"🐣 {self.pet_name} — Tamagotchi da Produtividade")
             dialog.destroy()
 
@@ -831,6 +1089,7 @@ class Tamagotchi(tk.Tk):
             self.owner_name,
             self.owner_nickname,
             self.owner_age,
+            self.target_minutes,
         )
 
     def edit_profile(self):
@@ -840,12 +1099,14 @@ class Tamagotchi(tk.Tk):
             owner_name,
             owner_nickname,
             owner_age,
+            target_minutes,
         ) = self.ask_profile_setup(
             initial_name=self.pet_name,
             initial_appearance=self.appearance,
             initial_owner_name=self.owner_name,
             initial_owner_nickname=self.owner_nickname,
             initial_owner_age=self.owner_age,
+            initial_target_minutes=self.target_minutes,
             first_time=False,
         )
         self.pet_name = name
@@ -853,69 +1114,9 @@ class Tamagotchi(tk.Tk):
         self.owner_name = owner_name
         self.owner_nickname = owner_nickname
         self.owner_age = owner_age
+        self.target_minutes = target_minutes
 
         self.label_name.config(text=self.pet_name)
-        save_state(
-            self.happiness,
-            self.xp,
-            self.level,
-            self.pet_name,
-            self.appearance,
-            self.owner_name,
-            self.owner_nickname,
-            self.owner_age,
-        )
-        self.refresh_stats()
-
-    def start_polling(self):
-        self.poll_active_window()
-        self.after(POLL_INTERVAL_MS, self.start_polling)
-
-    def poll_active_window(self):
-        title = get_active_window_title()
-        process_name = get_active_process_name()
-        category, label = classify_activity(title, process_name)
-
-        if category == "produtivo":
-            self.happiness = min(100, self.happiness + BOOST_PRODUCTIVE)
-            self.xp += XP_PER_PRODUCTIVE_TICK
-            if self.xp >= XP_PER_LEVEL:
-                self.xp -= XP_PER_LEVEL
-                self.level += 1
-            self.label_app.config(text=f"Atividade produtiva: {label}")
-
-        elif category == "distracao":
-            self.happiness = max(0, self.happiness - PENALTY_DISTRACTION)
-            
-            # Verifica se o TikTok está no título da janela ou processo
-            title_lower = (title or "").lower()
-            process_lower = (process_name or "").lower()
-
-            if "tiktok" in title_lower or "tiktok" in process_lower:
-                self.label_app.config(text="Para de assistir videos no tiktok!!!")
-            else:
-                self.label_app.config(text=f"Atenção: {label} está roubando o foco.")
-
-        else:
-            self.happiness = max(0, self.happiness - DECAY_PER_TICK)
-            self.label_app.config(text="Sem atividade definida no momento.")
-
-        if self.happiness <= CRITICAL_HAPPINESS and not self.notified_critical:
-            send_critical_notification(self.happiness)
-            self.notified_critical = True
-        elif self.happiness > CRITICAL_HAPPINESS:
-            self.notified_critical = False
-
-        save_state(
-            self.happiness,
-            self.xp,
-            self.level,
-            self.pet_name,
-            self.appearance,
-            self.owner_name,
-            self.owner_nickname,
-            self.owner_age,
-        )
         self.refresh_stats()
 
 
